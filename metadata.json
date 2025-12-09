@@ -1,0 +1,7 @@
+{
+  "name": "ARIX Signature Christmas Tree",
+  "description": "圣诞树",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
