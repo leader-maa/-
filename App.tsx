@@ -1,9 +1,40 @@
-import React, { useState, Suspense, useEffect, useRef } from 'react';
+import React, { useState, Suspense, useEffect, useRef, Component, ErrorInfo } from 'react';
 import Scene from './components/Scene';
 import Overlay from './components/Overlay';
 import GestureController from './components/GestureController';
 
-// Initial Start Screen to handle Autoplay Policy
+// --- Error Boundary to catch crashes ---
+class ErrorBoundary extends Component<{ children: React.ReactNode }, { hasError: boolean, error: string }> {
+  constructor(props: any) {
+    super(props);
+    this.state = { hasError: false, error: "" };
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, error: error.toString() };
+  }
+
+  componentDidCatch(error: any, errorInfo: ErrorInfo) {
+    console.error("App Crash:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#1a0b2e] text-pink-500 p-10 text-center">
+          <h1 className="text-2xl font-bold mb-4">⚠️ 应用遇到问题</h1>
+          <p className="mb-4 text-gray-300">请尝试刷新页面。如果问题持续，可能是网络原因导致 AI 模型无法加载。</p>
+          <code className="bg-black/50 p-4 rounded text-xs text-red-400 font-mono text-left w-full max-w-lg overflow-auto">
+            {this.state.error}
+          </code>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// Initial Start Screen
 const StartScreen: React.FC<{ onStart: () => void }> = ({ onStart }) => {
     return (
         <div 
@@ -35,7 +66,6 @@ const BackgroundMusic: React.FC<{ isStarted: boolean }> = ({ isStarted }) => {
         }
 
         if (isStarted && audioRef.current) {
-            // Attempt to play only after user interaction (start button)
             const playPromise = audioRef.current.play();
             if (playPromise !== undefined) {
                 playPromise.catch(error => {
@@ -56,7 +86,6 @@ const BackgroundMusic: React.FC<{ isStarted: boolean }> = ({ isStarted }) => {
 }
 
 const App: React.FC = () => {
-  // Core state: Chaos vs Order
   const [isTreeShape, setIsTreeShape] = useState(false);
   const [rotationSpeed, setRotationSpeed] = useState(0);
   const [isPinching, setIsPinching] = useState(false);
@@ -64,46 +93,42 @@ const App: React.FC = () => {
 
   return (
     <div className="relative w-full h-full bg-[#1a0b2e]">
-      
-      {!hasStarted && <StartScreen onStart={() => setHasStarted(true)} />}
+      <ErrorBoundary>
+          {!hasStarted && <StartScreen onStart={() => setHasStarted(true)} />}
 
-      {/* Background Music - Only plays after start */}
-      <BackgroundMusic isStarted={hasStarted} />
+          <BackgroundMusic isStarted={hasStarted} />
 
-      {/* Gesture Control Logic (Includes Camera Preview) */}
-      {hasStarted && (
-          <GestureController 
-            setAssemble={setIsTreeShape} 
-            setRotationSpeed={setRotationSpeed}
-            setIsPinching={setIsPinching}
-          />
-      )}
+          {hasStarted && (
+              <GestureController 
+                setAssemble={setIsTreeShape} 
+                setRotationSpeed={setRotationSpeed}
+                setIsPinching={setIsPinching}
+              />
+          )}
 
-      {/* UI Layer */}
-      <Overlay isTreeShape={isTreeShape} setIsTreeShape={setIsTreeShape} />
-      
-      {/* 3D Layer */}
-      {hasStarted && (
-        <Suspense fallback={
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <div className="flex flex-col items-center">
-                    <div className="w-8 h-8 border-2 border-pink-400 border-t-transparent rounded-full animate-spin mb-4"></div>
-                    <span className="text-pink-200 animate-pulse text-xs tracking-widest">LOADING RESOURCES...</span>
+          <Overlay isTreeShape={isTreeShape} setIsTreeShape={setIsTreeShape} />
+          
+          {hasStarted && (
+            <Suspense fallback={
+                <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-40">
+                    <div className="flex flex-col items-center">
+                        <div className="w-8 h-8 border-2 border-pink-400 border-t-transparent rounded-full animate-spin mb-4"></div>
+                        <span className="text-pink-200 animate-pulse text-xs tracking-widest">LOADING 3D SCENE...</span>
+                    </div>
                 </div>
-            </div>
-        }>
-            <Scene 
-            isTreeShape={isTreeShape} 
-            rotationSpeed={rotationSpeed}
-            isPinching={isPinching}
-            />
-        </Suspense>
-      )}
-      
-      {/* Initialization Text (Behind scene) */}
-      <div className="absolute inset-0 flex items-center justify-center pointer-events-none -z-10">
-         <span className="text-purple-800 animate-pulse text-xs tracking-widest">INITIALIZING ARIX...</span>
-      </div>
+            }>
+                <Scene 
+                isTreeShape={isTreeShape} 
+                rotationSpeed={rotationSpeed}
+                isPinching={isPinching}
+                />
+            </Suspense>
+          )}
+          
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none -z-10">
+             <span className="text-purple-800 animate-pulse text-xs tracking-widest">INITIALIZING ARIX...</span>
+          </div>
+      </ErrorBoundary>
     </div>
   );
 };

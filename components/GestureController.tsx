@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
-import { easing } from 'maath';
 
 interface GestureControllerProps {
   setAssemble: (assemble: boolean) => void;
@@ -14,222 +13,195 @@ const GestureController: React.FC<GestureControllerProps> = ({
   setIsPinching 
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const [isLoaded, setIsLoaded] = useState(false);
-  const [gestureStatus, setGestureStatus] = useState<string>("INITIALIZING");
+  const [status, setStatus] = useState<string>("INITIALIZING AI...");
+  const [isAiActive, setIsAiActive] = useState(false);
   
-  // Refs for smoothing and logic state
+  // Logic state refs
+  const lastVideoTimeRef = useRef(-1);
   const rotationSpeedRef = useRef(0);
-  const isPinchingRef = useRef(false);
-  const assembleRef = useRef(false); // Track local state for UI text
   
   useEffect(() => {
     let handLandmarker: HandLandmarker | null = null;
     let animationFrameId: number;
-    let video: HTMLVideoElement | null = videoRef.current;
+    let isCancelled = false;
 
     const setup = async () => {
       try {
+        setStatus("LOADING MODEL...");
+        
+        // 1. Load Vision Tasks (WASM)
         const vision = await FilesetResolver.forVisionTasks(
           "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm"
         );
+        
+        if (isCancelled) return;
+
+        // 2. Create HandLandmarker
+        // Using CPU delegate to prevent WebGL context conflicts with Three.js
         handLandmarker = await HandLandmarker.createFromOptions(vision, {
           baseOptions: {
             modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
-            delegate: "GPU"
+            delegate: "CPU" 
           },
           runningMode: "VIDEO",
           numHands: 1
         });
         
+        if (isCancelled) return;
+        
+        setStatus("STARTING CAM...");
         startWebcam();
+
       } catch (e) {
-        console.error("Failed to initialize MediaPipe", e);
-        setGestureStatus("CAMERA ERROR");
+        console.warn("AI Load Failed (Network Issue?):", e);
+        if (!isCancelled) {
+            setStatus("AI FAILED - MOUSE MODE ONLY");
+        }
       }
     };
 
     const startWebcam = async () => {
-        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia && video) {
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia && videoRef.current) {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ 
                     video: { width: 320, height: 240 }
                 });
-                video.srcObject = stream;
-                video.addEventListener('loadeddata', () => {
-                    setIsLoaded(true);
-                    setGestureStatus("WAITING FOR HAND");
-                    predictWebcam();
-                });
+                
+                if (isCancelled) {
+                    stream.getTracks().forEach(t => t.stop());
+                    return;
+                }
+
+                if (videoRef.current) {
+                    videoRef.current.srcObject = stream;
+                    videoRef.current.addEventListener('loadeddata', () => {
+                        if (isCancelled) return;
+                        setIsAiActive(true);
+                        setStatus("ACTIVE");
+                        predictWebcam();
+                    });
+                }
             } catch (err) {
-                console.error("Camera access denied", err);
-                setGestureStatus("NO CAMERA");
+                console.error("Camera denied:", err);
+                if (!isCancelled) setStatus("CAMERA DENIED");
             }
         }
-    }
-
-    let lastVideoTime = -1;
-    let fistFrameCount = 0;
-    let openFrameCount = 0;
-    const STATE_THRESHOLD = 5; 
+    };
 
     const predictWebcam = () => {
-        if (!handLandmarker || !video) return;
+        if (!handLandmarker || !videoRef.current || isCancelled) return;
         
-        let startTimeMs = performance.now();
-        if (video.currentTime !== lastVideoTime) {
-            lastVideoTime = video.currentTime;
-            const result = handLandmarker.detectForVideo(video, startTimeMs);
-            
-            let targetRotation = 0;
-            let currentStatus = "IDLE";
-
-            if (result.landmarks && result.landmarks.length > 0) {
-                const landmarks = result.landmarks[0];
-                const wrist = landmarks[0];
-
-                // --- 1. Finger Folding (Fist vs Open) ---
-                const isFolded = (tipIdx: number, mcpIdx: number) => {
-                    const tip = landmarks[tipIdx];
-                    const mcp = landmarks[mcpIdx];
-                    const dTip = Math.hypot(tip.x - wrist.x, tip.y - wrist.y);
-                    const dMcp = Math.hypot(mcp.x - wrist.x, mcp.y - wrist.y);
-                    return dTip < dMcp;
-                }
-
-                let foldedCount = 0;
-                if (isFolded(8, 5)) foldedCount++;   // Index
-                if (isFolded(12, 9)) foldedCount++;  // Middle
-                if (isFolded(16, 13)) foldedCount++; // Ring
-                if (isFolded(20, 17)) foldedCount++; // Pinky
-                
-                if (foldedCount >= 3) {
-                   fistFrameCount++;
-                   openFrameCount = 0;
-                } else if (foldedCount <= 1) {
-                   openFrameCount++;
-                   fistFrameCount = 0;
-                } else {
-                    fistFrameCount = Math.max(0, fistFrameCount - 1);
-                    openFrameCount = Math.max(0, openFrameCount - 1);
-                }
-
-                if (fistFrameCount > STATE_THRESHOLD) {
-                    setAssemble(true);
-                    assembleRef.current = true;
-                }
-                if (openFrameCount > STATE_THRESHOLD) {
-                    setAssemble(false);
-                    assembleRef.current = false;
-                }
-
-                if (assembleRef.current) currentStatus = "ASSEMBLING";
-                else currentStatus = "DISSOLVING";
-
-                // --- 2. Pinch Detection with Hysteresis ---
-                const thumbTip = landmarks[4];
-                const indexTip = landmarks[8];
-                const pinchDist = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
-                
-                if (!isPinchingRef.current && pinchDist < 0.05) {
-                    isPinchingRef.current = true;
-                    setIsPinching(true);
-                } else if (isPinchingRef.current && pinchDist > 0.10) {
-                    isPinchingRef.current = false;
-                    setIsPinching(false);
-                }
-
-                if (isPinchingRef.current) {
-                    currentStatus = "MEMORY RECALL";
-                }
-
-                // --- 3. Hand Rotation (Tilt) ---
-                // "Harder to trigger" logic
-                const indexMCP = landmarks[5];
-                const pinkyMCP = landmarks[17];
-                const dx = pinkyMCP.x - indexMCP.x;
-                const dy = pinkyMCP.y - indexMCP.y;
-                const angle = Math.atan2(dy, dx); 
-                
-                // Increased DEADZONE to 0.6 rad (~35 degrees)
-                // This forces the user to deliberately rotate the hand
-                const DEADZONE = 0.6;
-                
-                // Check if hand is roughly vertical (fingers pointing up) to distinguish from weird angles?
-                // For now, angle deadzone is the most robust simple check.
-                
-                if (Math.abs(angle) > DEADZONE && !isPinchingRef.current) {
-                    const sign = Math.sign(angle);
-                    const magnitude = Math.abs(angle) - DEADZONE;
-                    // Significantly reduced speed multiplier (0.15) for controlled rotation
-                    targetRotation = sign * magnitude * 0.15; 
-                    currentStatus = sign > 0 ? "ROTATING RIGHT" : "ROTATING LEFT";
-                } else {
-                    targetRotation = 0;
-                }
-            } else {
-                targetRotation = 0;
-                currentStatus = "NO HAND";
-                if (isPinchingRef.current) {
-                    isPinchingRef.current = false;
-                    setIsPinching(false);
-                }
-            }
-
-            setGestureStatus(currentStatus);
-
-            // Increased smoothing factor for inertia
-            rotationSpeedRef.current += (targetRotation - rotationSpeedRef.current) * 0.05;
-            
-            if (Math.abs(rotationSpeedRef.current) < 0.0001) rotationSpeedRef.current = 0;
-            
-            setRotationSpeed(rotationSpeedRef.current);
+        const video = videoRef.current;
+        
+        // --- CRITICAL FIX START ---
+        // Prevent "Framebuffer is incomplete: Attachment has zero size" error
+        // MediaPipe will crash WebGL if passed a video with 0 width/height
+        if (video.videoWidth === 0 || video.videoHeight === 0) {
+            animationFrameId = requestAnimationFrame(predictWebcam);
+            return;
         }
+        // --- CRITICAL FIX END ---
+
+        let startTimeMs = performance.now();
+
+        if (video.currentTime !== lastVideoTimeRef.current) {
+            lastVideoTimeRef.current = video.currentTime;
+            
+            try {
+                const result = handLandmarker.detectForVideo(video, startTimeMs);
+                
+                // Defaults
+                let targetAssemble = false;
+                let targetPinch = false;
+                let targetRot = 0;
+
+                if (result.landmarks && result.landmarks.length > 0) {
+                    const landmarks = result.landmarks[0];
+                    const wrist = landmarks[0];
+                    const thumbTip = landmarks[4];
+                    const indexTip = landmarks[8];
+                    const middleTip = landmarks[12];
+                    const ringTip = landmarks[16];
+                    const pinkyTip = landmarks[20];
+
+                    // --- 1. Fist Detection (Assemble Tree) ---
+                    const tips = [indexTip, middleTip, ringTip, pinkyTip];
+                    let avgDist = 0;
+                    tips.forEach(p => {
+                        avgDist += Math.sqrt(
+                            Math.pow(p.x - wrist.x, 2) + Math.pow(p.y - wrist.y, 2)
+                        );
+                    });
+                    avgDist /= 4;
+                    
+                    if (avgDist < 0.25) {
+                        targetAssemble = true;
+                    }
+
+                    // --- 2. Pinch Detection (Open Gift) ---
+                    const pinchDist = Math.sqrt(
+                        Math.pow(thumbTip.x - indexTip.x, 2) + 
+                        Math.pow(thumbTip.y - indexTip.y, 2)
+                    );
+                    if (pinchDist < 0.05) {
+                        targetPinch = true;
+                    }
+
+                    // --- 3. Rotation (Tilt) ---
+                    const centerX = wrist.x;
+                    const deadZone = 0.1;
+                    if (Math.abs(centerX - 0.5) > deadZone) {
+                        targetRot = (0.5 - centerX) * 4.0; 
+                    }
+                }
+
+                setAssemble(targetAssemble);
+                setIsPinching(targetPinch);
+                
+                rotationSpeedRef.current += (targetRot - rotationSpeedRef.current) * 0.1;
+                setRotationSpeed(rotationSpeedRef.current);
+
+            } catch (e) {
+                console.error("Prediction Error:", e);
+            }
+        }
+
         animationFrameId = requestAnimationFrame(predictWebcam);
-    }
+    };
 
     setup();
 
     return () => {
-        if(video && video.srcObject) {
-            const tracks = (video.srcObject as MediaStream).getTracks();
-            tracks.forEach(t => t.stop());
+        isCancelled = true;
+        if(animationFrameId) cancelAnimationFrame(animationFrameId);
+        if(handLandmarker) handLandmarker.close();
+        if (videoRef.current && videoRef.current.srcObject) {
+            const stream = videoRef.current.srcObject as MediaStream;
+            stream.getTracks().forEach(t => t.stop());
         }
-        cancelAnimationFrame(animationFrameId);
-        if (handLandmarker) handLandmarker.close();
-    }
+    };
   }, [setAssemble, setRotationSpeed, setIsPinching]);
 
   return (
-    <div className="fixed bottom-6 right-6 z-50 transition-opacity duration-500" style={{ opacity: isLoaded ? 1 : 0 }}>
-        <div className="relative flex flex-col items-end gap-2">
-            {/* Gesture Status Text */}
-            <div className="bg-black/40 backdrop-blur-md px-3 py-1 rounded-full border border-pink-500/20">
-                <span className="text-[10px] font-mono font-bold tracking-widest text-pink-300 animate-pulse">
-                    [{gestureStatus}]
+    <div className="absolute top-4 left-4 z-50 pointer-events-none">
+        {/* Webcam Preview */}
+        <div className={`relative w-32 h-24 rounded-lg overflow-hidden border-2 transition-colors duration-300 ${isAiActive ? 'border-pink-500/50' : 'border-gray-800'}`}>
+            <video 
+                ref={videoRef}
+                className={`w-full h-full object-cover transform -scale-x-100 ${isAiActive ? 'opacity-100' : 'opacity-0'}`}
+                autoPlay 
+                playsInline
+                muted
+            />
+            {/* Status Overlay */}
+            <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+                <span className="text-[10px] text-pink-200 font-mono tracking-wider text-center px-1">
+                    {status}
                 </span>
-            </div>
-
-            {/* Video Container */}
-            <div className="relative rounded-xl overflow-hidden shadow-[0_0_20px_rgba(255,182,193,0.3)] border border-pink-500/30 w-32 h-24 bg-black/50 backdrop-blur-sm">
-                <video 
-                    ref={videoRef} 
-                    autoPlay 
-                    playsInline
-                    muted
-                    className="w-full h-full object-cover transform -scale-x-100 opacity-80" // Mirror effect
-                />
-                <div className="absolute top-1 left-2 text-[8px] text-pink-200 font-mono tracking-widest uppercase opacity-70">
-                    Arix Vision
-                </div>
-                {/* Pinch Indicator */}
-                <div className={`absolute top-2 right-2 w-2 h-2 rounded-full transition-colors duration-300 ${isPinchingRef.current ? 'bg-green-400 shadow-[0_0_8px_#4ade80]' : 'bg-red-900/50'}`}></div>
-
-                <div className="absolute top-0 left-0 w-2 h-2 border-t border-l border-pink-400"></div>
-                <div className="absolute bottom-0 right-0 w-2 h-2 border-b border-r border-pink-400"></div>
             </div>
         </div>
     </div>
   );
-}
+};
 
 export default GestureController;
